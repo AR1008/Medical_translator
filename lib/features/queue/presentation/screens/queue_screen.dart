@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 import '../../../auth/presentation/providers/auth_provider.dart';
-import '../../../../core/database/database_helper.dart';
+import '../../../../core/services/firebase_service.dart';
 
 class QueueScreen extends ConsumerStatefulWidget {
   const QueueScreen({super.key});
@@ -12,19 +12,16 @@ class QueueScreen extends ConsumerStatefulWidget {
 }
 
 class _QueueScreenState extends ConsumerState<QueueScreen> {
-  final DatabaseHelper _db = DatabaseHelper.instance;
+  final FirebaseService _firebase = FirebaseService.instance;
   List<Map<String, dynamic>> _doctors = [];
   String? _selectedDoctorId;
+  bool _isLoading = true;
   
   // Triage questions
-  bool _hasChestPain = false;
-  bool _hasDifficultyBreathing = false;
-  bool _hasSevereHeadache = false;
-  bool _hasHighFever = false;
-  bool _hasBloodInStool = false;
-  bool _hasSevereAbdominalPain = false;
-  int _painLevel = 0;
-  
+  bool _hasSymptoms = false;
+  bool _needsUrgentCare = false;
+  bool _hasChronicCondition = false;
+
   @override
   void initState() {
     super.initState();
@@ -32,65 +29,30 @@ class _QueueScreenState extends ConsumerState<QueueScreen> {
   }
 
   Future<void> _loadDoctors() async {
-    final db = await _db.database;
-    final doctors = await db.query(
-      'users',
-      where: 'userType = ? AND isActive = 1',
-      whereArgs: ['doctor'],
-    );
-    setState(() => _doctors = doctors);
+    setState(() => _isLoading = true);
+    try {
+      final doctors = await _firebase.getAllDoctors();
+      print('📋 Loaded ${doctors.length} doctors');
+      setState(() {
+        _doctors = doctors;
+        _isLoading = false;
+      });
+    } catch (e) {
+      print('❌ Error loading doctors: $e');
+      setState(() => _isLoading = false);
+    }
   }
 
   int _calculatePriority() {
-    // Critical symptoms - Priority 1
-    if (_hasChestPain || _hasDifficultyBreathing || _hasBloodInStool) {
-      return 1; // CRITICAL
-    }
-    
-    // Urgent symptoms - Priority 2
-    if (_hasSevereHeadache || _hasSevereAbdominalPain || _painLevel >= 8) {
-      return 2; // URGENT
-    }
-    
-    // Moderate symptoms - Priority 3
-    if (_hasHighFever || _painLevel >= 5) {
-      return 3; // MODERATE
-    }
-    
-    // Low priority - Priority 4
-    if (_painLevel >= 3) {
-      return 4; // LOW
-    }
-    
-    // Routine - Priority 5
-    return 5; // ROUTINE
-  }
-
-  String _getPriorityText(int priority) {
-    switch (priority) {
-      case 1: return 'CRITICAL';
-      case 2: return 'URGENT';
-      case 3: return 'MODERATE';
-      case 4: return 'LOW';
-      default: return 'ROUTINE';
-    }
-  }
-
-  Color _getPriorityColor(int priority) {
-    switch (priority) {
-      case 1: return Colors.red;
-      case 2: return Colors.orange;
-      case 3: return Colors.yellow.shade700;
-      case 4: return Colors.blue;
-      default: return Colors.green;
-    }
+    if (_needsUrgentCare) return 1; // High
+    if (_hasSymptoms) return 2; // Medium
+    return 3; // Low
   }
 
   Future<void> _joinQueue() async {
-    final authState = ref.read(authNotifierProvider);
+    final currentUser = ref.read(authNotifierProvider).value;
     
-    final user = authState.value;
-    if (user == null) {
+    if (currentUser == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Please login first')),
       );
@@ -104,309 +66,145 @@ class _QueueScreenState extends ConsumerState<QueueScreen> {
       return;
     }
 
-    final priority = _calculatePriority();
-    
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Confirm Queue Entry'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Patient: ${user.fullName}'),
-            const SizedBox(height: 8),
-            Text('Doctor: ${_doctors.firstWhere((d) => d['id'] == _selectedDoctorId)['fullName']}'),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                const Text('Priority: '),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: _getPriorityColor(priority),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Text(
-                    _getPriorityText(priority),
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Join Queue'),
-          ),
-        ],
-      ),
-    );
+    try {
+      final queueId = const Uuid().v4();
+      final now = DateTime.now().toIso8601String();
+      final priority = _calculatePriority();
 
-    if (confirm == true) {
-      await _db.addToQueue({
-        'id': const Uuid().v4(),
-        'patientId': user.id,
-        'priority': priority,
-        'department': 'General',
-        'status': 'waiting',
+      final queueData = {
+        'id': queueId,
+        'patientId': currentUser.id,
+        'patientName': currentUser.fullName,
+        'patientPhone': currentUser.phone,
         'assignedDoctorId': _selectedDoctorId,
-        'checkinTime': DateTime.now().toIso8601String(),
-        'notes': _buildTriageNotes(),
-      });
+        'status': 'waiting',
+        'checkinTime': now,
+        'priority': priority,
+        'triageData': {
+          'hasSymptoms': _hasSymptoms,
+          'needsUrgentCare': _needsUrgentCare,
+          'hasChronicCondition': _hasChronicCondition,
+        },
+      };
+
+      print('📤 Joining queue with data: $queueData');
+      await _firebase.addToQueue(queueData);
+      print('✅ Successfully added to queue!');
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Added to queue with ${_getPriorityText(priority)} priority'),
+          const SnackBar(
+            content: Text('✅ Successfully joined queue!'),
             backgroundColor: Colors.green,
           ),
         );
         Navigator.pop(context);
       }
+    } catch (e) {
+      print('❌ Error joining queue: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: $e')),
+        );
+      }
     }
-  }
-
-  String _buildTriageNotes() {
-    final notes = <String>[];
-    if (_hasChestPain) notes.add('Chest pain');
-    if (_hasDifficultyBreathing) notes.add('Difficulty breathing');
-    if (_hasSevereHeadache) notes.add('Severe headache');
-    if (_hasHighFever) notes.add('High fever');
-    if (_hasBloodInStool) notes.add('Blood in stool');
-    if (_hasSevereAbdominalPain) notes.add('Severe abdominal pain');
-    notes.add('Pain level: $_painLevel/10');
-    return notes.join(', ');
   }
 
   @override
   Widget build(BuildContext context) {
-    final authState = ref.watch(authNotifierProvider);
-    final user = authState.value;
-
     return Scaffold(
       appBar: AppBar(
         title: const Text('Join Queue'),
+        backgroundColor: Colors.blue,
+        foregroundColor: Colors.white,
       ),
-      body: user == null
-          ? const Center(child: Text('Please login first'))
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
           : SingleChildScrollView(
               padding: const EdgeInsets.all(16),
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  // Patient Info (Auto-filled)
-                  Card(
-                    color: Colors.blue.shade50,
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            'Patient Information',
-                            style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Text('Name: ${user.fullName}'),
-                          if (user.phone != null) Text('Phone: ${user.phone}'),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-
-                  // Doctor Selection
                   const Text(
                     'Select Doctor',
                     style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                   ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 16),
+                  
                   if (_doctors.isEmpty)
-                    const Center(child: CircularProgressIndicator())
+                    const Card(
+                      child: Padding(
+                        padding: EdgeInsets.all(16),
+                        child: Text('No doctors available'),
+                      ),
+                    )
                   else
-                    ...List.generate(_doctors.length, (index) {
-                      final doctor = _doctors[index];
-                      final isSelected = _selectedDoctorId == doctor['id'];
-                      return Card(
-                        color: isSelected ? Colors.blue.shade100 : null,
-                        child: ListTile(
-                          leading: CircleAvatar(
-                            backgroundColor: Colors.blue.shade100,
-                            child: const Icon(Icons.medical_services, color: Colors.blue),
+                    ..._doctors.map((doctor) => Card(
+                          elevation: 2,
+                          margin: const EdgeInsets.only(bottom: 12),
+                          child: RadioListTile<String>(
+                            title: Text(
+                              doctor['fullName'] ?? 'Unknown',
+                              style: const TextStyle(fontWeight: FontWeight.bold),
+                            ),
+                            subtitle: Text(
+                              '${doctor['department'] ?? 'General'}\n${doctor['specialization'] ?? 'Doctor'}',
+                            ),
+                            value: doctor['id'],
+                            groupValue: _selectedDoctorId,
+                            onChanged: (value) {
+                              setState(() => _selectedDoctorId = value);
+                            },
                           ),
-                          title: Text('Dr. ${doctor['fullName']}'),
-                          subtitle: Text(doctor['specialization'] ?? 'General Physician'),
-                          trailing: isSelected
-                              ? const Icon(Icons.check_circle, color: Colors.blue)
-                              : null,
-                          onTap: () {
-                            setState(() => _selectedDoctorId = doctor['id']);
-                          },
-                        ),
-                      );
-                    }),
+                        )),
+                  
                   const SizedBox(height: 24),
-
-                  // Triage Questions
                   const Text(
-                    'Triage Assessment',
+                    'Triage Questions',
                     style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                   ),
-                  const SizedBox(height: 8),
-                  const Text(
-                    'Please answer these questions to help us prioritize your care:',
-                    style: TextStyle(color: Colors.grey),
-                  ),
                   const SizedBox(height: 16),
-
-                  _buildTriageQuestion(
-                    'Do you have chest pain?',
-                    _hasChestPain,
-                    (value) => setState(() => _hasChestPain = value),
-                  ),
-                  _buildTriageQuestion(
-                    'Are you having difficulty breathing?',
-                    _hasDifficultyBreathing,
-                    (value) => setState(() => _hasDifficultyBreathing = value),
-                  ),
-                  _buildTriageQuestion(
-                    'Do you have severe headache?',
-                    _hasSevereHeadache,
-                    (value) => setState(() => _hasSevereHeadache = value),
-                  ),
-                  _buildTriageQuestion(
-                    'Do you have high fever (>103°F)?',
-                    _hasHighFever,
-                    (value) => setState(() => _hasHighFever = value),
-                  ),
-                  _buildTriageQuestion(
-                    'Is there blood in your stool?',
-                    _hasBloodInStool,
-                    (value) => setState(() => _hasBloodInStool = value),
-                  ),
-                  _buildTriageQuestion(
-                    'Do you have severe abdominal pain?',
-                    _hasSevereAbdominalPain,
-                    (value) => setState(() => _hasSevereAbdominalPain = value),
-                  ),
-
-                  const SizedBox(height: 16),
-                  const Text(
-                    'Pain Level (0 = No pain, 10 = Worst pain)',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Slider(
-                          value: _painLevel.toDouble(),
-                          min: 0,
-                          max: 10,
-                          divisions: 10,
-                          label: _painLevel.toString(),
-                          onChanged: (value) {
-                            setState(() => _painLevel = value.toInt());
-                          },
-                        ),
-                      ),
-                      Container(
-                        width: 40,
-                        height: 40,
-                        decoration: BoxDecoration(
-                          color: _painLevel >= 7 ? Colors.red : _painLevel >= 4 ? Colors.orange : Colors.green,
-                          shape: BoxShape.circle,
-                        ),
-                        child: Center(
-                          child: Text(
-                            _painLevel.toString(),
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 18,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-
-                  const SizedBox(height: 24),
-
-                  // Priority Preview
+                  
                   Card(
-                    color: _getPriorityColor(_calculatePriority()).withOpacity(0.2),
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Row(
-                        children: [
-                          Icon(
-                            Icons.priority_high,
-                            color: _getPriorityColor(_calculatePriority()),
-                          ),
-                          const SizedBox(width: 12),
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text(
-                                'Your Priority Level:',
-                                style: TextStyle(fontSize: 12),
-                              ),
-                              Text(
-                                _getPriorityText(_calculatePriority()),
-                                style: TextStyle(
-                                  fontSize: 20,
-                                  fontWeight: FontWeight.bold,
-                                  color: _getPriorityColor(_calculatePriority()),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
+                    child: SwitchListTile(
+                      title: const Text('Are you experiencing symptoms?'),
+                      value: _hasSymptoms,
+                      onChanged: (value) => setState(() => _hasSymptoms = value),
                     ),
                   ),
-
+                  Card(
+                    child: SwitchListTile(
+                      title: const Text('Do you need urgent care?'),
+                      subtitle: const Text('Severe pain, difficulty breathing, etc.'),
+                      value: _needsUrgentCare,
+                      onChanged: (value) => setState(() => _needsUrgentCare = value),
+                    ),
+                  ),
+                  Card(
+                    child: SwitchListTile(
+                      title: const Text('Do you have a chronic condition?'),
+                      subtitle: const Text('Diabetes, hypertension, etc.'),
+                      value: _hasChronicCondition,
+                      onChanged: (value) => setState(() => _hasChronicCondition = value),
+                    ),
+                  ),
+                  
                   const SizedBox(height: 24),
-
-                  // Join Button
-                  SizedBox(
-                    width: double.infinity,
-                    height: 50,
-                    child: FilledButton(
-                      onPressed: _joinQueue,
-                      child: const Text(
-                        'Join Queue',
-                        style: TextStyle(fontSize: 16),
-                      ),
+                  ElevatedButton(
+                    onPressed: _joinQueue,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.blue,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.all(16),
+                    ),
+                    child: const Text(
+                      'Join Queue',
+                      style: TextStyle(fontSize: 18),
                     ),
                   ),
                 ],
               ),
             ),
-    );
-  }
-
-  Widget _buildTriageQuestion(String question, bool value, Function(bool) onChanged) {
-    return Card(
-      child: SwitchListTile(
-        title: Text(question),
-        value: value,
-        onChanged: onChanged,
-        activeColor: Colors.red,
-      ),
     );
   }
 }

@@ -1,5 +1,5 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../../../../core/database/database_helper.dart';
+import '../../../../core/services/firebase_service.dart';
 import '../../../auth/data/models/user_model.dart';
 
 final authNotifierProvider = StateNotifierProvider<AuthNotifier, AsyncValue<User?>>((ref) {
@@ -7,7 +7,7 @@ final authNotifierProvider = StateNotifierProvider<AuthNotifier, AsyncValue<User
 });
 
 class AuthNotifier extends StateNotifier<AsyncValue<User?>> {
-  final DatabaseHelper _db = DatabaseHelper.instance;
+  final FirebaseService _firebase = FirebaseService.instance;
 
   AuthNotifier() : super(const AsyncValue.loading()) {
     _checkAuth();
@@ -22,23 +22,20 @@ class AuthNotifier extends StateNotifier<AsyncValue<User?>> {
       print('🔐 Login attempt: $username');
       state = const AsyncValue.loading();
       
-      final userData = await _db.login(username, password);
-      print('📊 User data: $userData');
+      final userData = await _firebase.login(username, password);
       
       if (userData != null) {
         final user = User.fromMap(userData);
-        print('✅ User created: ${user.fullName}, type: ${user.userType}');
+        print('✅ User logged in: ${user.fullName}');
         state = AsyncValue.data(user);
-        print('✅ State updated with user');
         return true;
       } else {
-        print('❌ Login failed - invalid credentials');
+        print('❌ Login failed');
         state = const AsyncValue.data(null);
         return false;
       }
     } catch (e, stack) {
       print('❌ Login error: $e');
-      print('Stack: $stack');
       state = AsyncValue.error(e, stack);
       return false;
     }
@@ -46,8 +43,7 @@ class AuthNotifier extends StateNotifier<AsyncValue<User?>> {
 
   Future<bool> register(Map<String, dynamic> userData) async {
     try {
-      final success = await _db.registerUser(userData);
-      return success;
+      return await _firebase.registerUser(userData);
     } catch (e) {
       return false;
     }
@@ -58,6 +54,6 @@ class AuthNotifier extends StateNotifier<AsyncValue<User?>> {
   }
 
   Future<bool> checkUsername(String username) async {
-    return await _db.usernameExists(username);
+    return await _firebase.usernameExists(username);
   }
 }

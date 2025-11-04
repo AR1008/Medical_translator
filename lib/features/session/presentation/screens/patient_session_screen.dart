@@ -3,28 +3,27 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:translator/translator.dart';
-import '../../../auth/data/models/user_model.dart';
 import '../../../../core/services/firebase_service.dart';
 
-class RealtimeSessionScreen extends ConsumerStatefulWidget {
+class PatientSessionScreen extends ConsumerStatefulWidget {
   final String sessionId;
-  final User doctor;
   final String patientId;
   final String patientName;
+  final String doctorName;
 
-  const RealtimeSessionScreen({
+  const PatientSessionScreen({
     super.key,
     required this.sessionId,
-    required this.doctor,
     required this.patientId,
     required this.patientName,
+    required this.doctorName,
   });
 
   @override
-  ConsumerState<RealtimeSessionScreen> createState() => _RealtimeSessionScreenState();
+  ConsumerState<PatientSessionScreen> createState() => _PatientSessionScreenState();
 }
 
-class _RealtimeSessionScreenState extends ConsumerState<RealtimeSessionScreen> {
+class _PatientSessionScreenState extends ConsumerState<PatientSessionScreen> {
   final GoogleTranslator _translator = GoogleTranslator();
   final FlutterTts _tts = FlutterTts();
   final stt.SpeechToText _speech = stt.SpeechToText();
@@ -55,7 +54,7 @@ class _RealtimeSessionScreenState extends ConsumerState<RealtimeSessionScreen> {
       setState(() => _isListening = true);
       await _speech.listen(
         onResult: (result) => _textController.text = result.recognizedWords,
-        localeId: 'en_US',
+        localeId: 'kn_IN',
       );
     }
   }
@@ -70,21 +69,19 @@ class _RealtimeSessionScreenState extends ConsumerState<RealtimeSessionScreen> {
     try {
       print('🔄 Translating: $text');
       
-      // Translate synchronously
-      final translation = await _translator.translate(text, from: 'en', to: 'kn');
+      final translation = await _translator.translate(text, from: 'kn', to: 'en');
       final translatedText = translation.text;
       
       print('✅ Translated: $translatedText');
 
-      // Send complete message
       final message = {
-        'senderId': widget.doctor.id,
-        'senderName': widget.doctor.fullName,
-        'senderRole': 'doctor',
+        'senderId': widget.patientId,
+        'senderName': widget.patientName,
+        'senderRole': 'patient',
         'originalText': text,
         'translatedText': translatedText,
-        'originalLang': 'en',
-        'targetLang': 'kn',
+        'originalLang': 'kn',
+        'targetLang': 'en',
         'timestamp': DateTime.now().toIso8601String(),
       };
 
@@ -93,60 +90,23 @@ class _RealtimeSessionScreenState extends ConsumerState<RealtimeSessionScreen> {
       
     } catch (e) {
       print('❌ Error: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error: $e')),
-        );
-      }
     } finally {
       setState(() => _isSending = false);
     }
   }
 
   Future<void> _speakText(String text, String language) async {
-    await _tts.setLanguage(language == 'en' ? 'en-US' : 'kn-IN');
+    await _tts.setLanguage(language == 'kn' ? 'kn-IN' : 'en-US');
     await _tts.speak(text);
-  }
-
-  Future<void> _endSession() async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('End Session'),
-        content: const Text('End consultation?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-            child: const Text('End'),
-          ),
-        ],
-      ),
-    );
-
-    if (confirm == true) {
-      await _firebase.updateSession(widget.sessionId, {
-        'status': 'completed',
-        'endTime': DateTime.now().toIso8601String(),
-      });
-      if (mounted) Navigator.pop(context);
-    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text('Session: ${widget.patientName}'),
-        backgroundColor: Colors.blue,
+        title: Text('Dr. ${widget.doctorName}'),
+        backgroundColor: Colors.green,
         foregroundColor: Colors.white,
-        actions: [
-          IconButton(icon: const Icon(Icons.stop), onPressed: _endSession),
-        ],
       ),
       body: Column(
         children: [
@@ -163,11 +123,11 @@ class _RealtimeSessionScreenState extends ConsumerState<RealtimeSessionScreen> {
                 }
 
                 final messages = snapshot.data ?? [];
-                print('📊 Loaded ${messages.length} messages');
+                print('📊 Patient: Loaded ${messages.length} messages');
 
                 if (messages.isEmpty) {
                   return const Center(
-                    child: Text('Type or speak to begin', style: TextStyle(color: Colors.grey, fontSize: 16)),
+                    child: Text('Waiting for doctor...', style: TextStyle(color: Colors.grey, fontSize: 16)),
                   );
                 }
 
@@ -181,7 +141,7 @@ class _RealtimeSessionScreenState extends ConsumerState<RealtimeSessionScreen> {
                     return Padding(
                       padding: const EdgeInsets.only(bottom: 16),
                       child: Align(
-                        alignment: isDoctor ? Alignment.centerRight : Alignment.centerLeft,
+                        alignment: isDoctor ? Alignment.centerLeft : Alignment.centerRight,
                         child: Container(
                           constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.75),
                           padding: const EdgeInsets.all(12),
@@ -198,7 +158,6 @@ class _RealtimeSessionScreenState extends ConsumerState<RealtimeSessionScreen> {
                               ),
                               const SizedBox(height: 8),
                               
-                              // Original text
                               Row(
                                 children: [
                                   Expanded(
@@ -218,7 +177,6 @@ class _RealtimeSessionScreenState extends ConsumerState<RealtimeSessionScreen> {
                               
                               const Divider(height: 16, thickness: 1),
                               
-                              // Translated text
                               Row(
                                 children: [
                                   Expanded(
@@ -255,7 +213,7 @@ class _RealtimeSessionScreenState extends ConsumerState<RealtimeSessionScreen> {
             child: Row(
               children: [
                 IconButton(
-                  icon: Icon(_isListening ? Icons.stop : Icons.mic, color: _isListening ? Colors.red : Colors.blue),
+                  icon: Icon(_isListening ? Icons.stop : Icons.mic, color: _isListening ? Colors.red : Colors.green),
                   onPressed: _toggleListening,
                 ),
                 Expanded(
@@ -271,13 +229,9 @@ class _RealtimeSessionScreenState extends ConsumerState<RealtimeSessionScreen> {
                 ),
                 const SizedBox(width: 8),
                 _isSending
-                    ? const SizedBox(
-                        width: 24,
-                        height: 24,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
+                    ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2))
                     : IconButton(
-                        icon: const Icon(Icons.send, color: Colors.blue, size: 28),
+                        icon: const Icon(Icons.send, color: Colors.green, size: 28),
                         onPressed: _sendMessage,
                       ),
               ],
